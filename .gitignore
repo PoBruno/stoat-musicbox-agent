@@ -1,0 +1,10 @@
+# Artefatos
+node_modules/
+dist/
+
+# Segredos
+.env
+
+# Sistema
+.DS_Store
+*.log

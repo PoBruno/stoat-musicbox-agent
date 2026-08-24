@@ -1,0 +1,40 @@
+name: musicbox-agent
+
+services:
+  agente:
+    build: .
+    image: musicbox-agent:local
+    restart: unless-stopped
+
+    # Só na rede local. Este serviço resolve endereços de mídia; exposto na
+    # internet vira um proxy de download aberto para qualquer um.
+    ports:
+      - "127.0.0.1:${PORTA:-7700}:7700"
+
+    environment:
+      PORTA: 7700
+      STOAT_URL: ${STOAT_URL:-}
+      AGENTE_SEGREDO: ${AGENTE_SEGREDO:-}
+      BATIMENTO_MS: ${BATIMENTO_MS:-15000}
+      ATUALIZAR_YTDLP: ${ATUALIZAR_YTDLP:-1}
+
+    # Extração é rajada curta, não trabalho contínuo. O teto existe para que
+    # uma faixa problemática não coma o container do Proxmox inteiro.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+    # O yt-dlp e o ffmpeg escrevem em /tmp. Em memória, e pequeno: nada aqui
+    # precisa sobreviver a um reinício.
+    tmpfs:
+      - /tmp:size=256m
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

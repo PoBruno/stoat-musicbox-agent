@@ -1,0 +1,19 @@
+{
+  "name": "musicbox-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Extrator de audio do MusicBox, para rodar em rede residencial",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --experimental-strip-types src/main.ts",
+    "start": "node --experimental-strip-types src/main.ts",
+    "verificar": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
