@@ -27,11 +27,24 @@ services:
 
     # O yt-dlp e o ffmpeg escrevem em /tmp. Em memória, e pequeno: nada aqui
     # precisa sobreviver a um reinício.
+    #
+    # O `exec` é obrigatório e não é descuido. O binário autônomo do yt-dlp
+    # extrai as próprias bibliotecas para o HOME e as mapeia como executáveis;
+    # o tmpfs do compose monta com `noexec` por padrão, e aí ele falha com
+    # "libz.so.1: failed to map segment", que culpa uma biblioteca em vez da
+    # montagem. O container roda como usuário comum e sem elevação, então o
+    # que se perde aqui é pouco.
     tmpfs:
-      - /tmp:size=256m
+      - /tmp:size=256m,exec
 
     security_opt:
       - no-new-privileges:true
+
+    # Permite alcançar um Stoat rodando na máquina anfitriã, que é o caso
+    # durante o desenvolvimento (o backend nativo escuta em :14702). Em
+    # produção o STOAT_URL é um endereço público e isto fica sem uso.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     logging:
       driver: json-file
