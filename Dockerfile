@@ -19,12 +19,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY package.json tsconfig.json ./
+COPY package.json package-lock.json* tsconfig.json ./
 COPY src ./src
 
-# Sem dependencias de producao: o agente usa so a biblioteca padrao do Node.
-# Menos coisa para atualizar, menos superficie, imagem menor.
-RUN npm install --omit=dev --no-audit --no-fund 2>/dev/null || true
+# O @livekit/rtc-node traz binario nativo (o cliente WebRTC), entao aqui ha
+# dependencia de verdade -- diferente de antes, quando o agente so usava a
+# biblioteca padrao. `npm ci` falharia sem lockfile, por isso o install.
+RUN npm install --omit=dev --no-audit --no-fund
 
 # O yt-dlp guarda cache em $HOME; sem isso ele reclama rodando como nao-root.
 ENV HOME=/tmp

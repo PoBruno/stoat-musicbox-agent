@@ -12,6 +12,9 @@
     "start": "node --experimental-strip-types src/main.ts",
     "verificar": "tsc --noEmit"
   },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"

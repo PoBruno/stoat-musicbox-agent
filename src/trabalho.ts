@@ -1,12 +1,40 @@
 import { config } from "./config.ts";
 import { ErroDeProvedor, resolver, type Faixa } from "./provedores.ts";
+import { parar, tocar } from "./tocar.ts";
 
 /** Trabalho entregue pelo servidor. */
 type Comando = {
   id: string;
+  kind: "resolve" | "play" | "stop";
   query: string;
   limit: number;
+  channel_id?: string | null;
+  track?: FaixaDoServidor | null;
 };
+
+/** Faixa no formato do servidor (inglês), como ela volta num comando. */
+type FaixaDoServidor = {
+  id: string;
+  provider: string;
+  title: string;
+  author: string | null;
+  duration_s: number | null;
+  cover_url: string | null;
+  page_url: string;
+};
+
+/** Converte de volta ao formato do agente. */
+function doServidor(t: FaixaDoServidor): Faixa {
+  return {
+    id: t.id,
+    provedor: t.provider,
+    titulo: t.title,
+    autor: t.author,
+    duracaoS: t.duration_s,
+    capaUrl: t.cover_url,
+    paginaUrl: t.page_url,
+  };
+}
 
 /**
  * Converte uma faixa do agente para o formato que o servidor espera.
@@ -65,18 +93,41 @@ async function atender(
   const comeco = Date.now();
 
   try {
-    const faixas = await resolver(comando.query, comando.limit);
-    console.log(
-      `[trabalho] "${comando.query.slice(0, 60)}" -> ${faixas.length} faixa(s) em ${Date.now() - comeco} ms`,
-    );
-    await devolver(base, segredo, {
-      id: comando.id,
-      tracks: faixas.map(paraOServidor),
-    });
+    switch (comando.kind) {
+      case "play": {
+        if (!comando.channel_id || !comando.track) {
+          throw new ErroDeProvedor("comando de tocar veio incompleto", "desconhecido");
+        }
+        await tocar(comando.channel_id, doServidor(comando.track));
+        console.log(
+          `[trabalho] tocando "${comando.track.title.slice(0, 50)}" em ${Date.now() - comeco} ms`,
+        );
+        await devolver(base, segredo, { id: comando.id, tracks: [] });
+        return;
+      }
+
+      case "stop": {
+        await parar();
+        await devolver(base, segredo, { id: comando.id, tracks: [] });
+        return;
+      }
+
+      default: {
+        const faixas = await resolver(comando.query, comando.limit);
+        console.log(
+          `[trabalho] "${comando.query.slice(0, 60)}" -> ${faixas.length} faixa(s) em ${Date.now() - comeco} ms`,
+        );
+        await devolver(base, segredo, {
+          id: comando.id,
+          tracks: faixas.map(paraOServidor),
+        });
+        return;
+      }
+    }
   } catch (erro) {
     const mensagem = erro instanceof Error ? erro.message : String(erro);
     const motivo = erro instanceof ErroDeProvedor ? erro.motivo : "desconhecido";
-    console.error(`[trabalho] falhou (${motivo}): ${mensagem}`);
+    console.error(`[trabalho] ${comando.kind} falhou (${motivo}): ${mensagem}`);
     await devolver(base, segredo, {
       id: comando.id,
       tracks: [],

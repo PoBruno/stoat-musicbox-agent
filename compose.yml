@@ -6,13 +6,31 @@ services:
     image: musicbox-agent:local
     restart: unless-stopped
 
-    # Só na rede local. Este serviço resolve endereços de mídia; exposto na
-    # internet vira um proxy de download aberto para qualquer um.
-    ports:
-      - "127.0.0.1:${PORTA:-7700}:7700"
+    # Rede do anfitrião, e isto merece explicação porque abre mão de
+    # isolamento.
+    #
+    # O agente precisa falar RTC com o LiveKit, e mídia não passa por proxy
+    # de porta: o LiveKit anuncia nos candidatos ICE o endereço em que ele
+    # acha que está. No desenvolvimento local esse endereço é `127.0.0.1`,
+    # que dentro de um contêiner aponta para o próprio contêiner — a
+    # sinalização conecta e a mídia morre com "connection refused", o que
+    # parece erro de credencial e não é.
+    #
+    # Pela mesma razão o `ws://localhost:8880` que o servidor anuncia só
+    # significa a coisa certa se `localhost` for o anfitrião.
+    #
+    # Em produção o agente roda numa máquina de casa contra um LiveKit com
+    # endereço público, onde rede em ponte funcionaria. Usar a mesma
+    # configuração nos dois evita que só se descubra a diferença na hora de
+    # implantar.
+    network_mode: host
 
     environment:
-      PORTA: 7700
+      # Sem publicação de porta em rede de anfitrião: quem limita o alcance é
+      # este endereço. `127.0.0.1` mantém a API acessível só da própria
+      # máquina, que era o efeito do mapeamento anterior.
+      ENDERECO: 127.0.0.1
+      PORTA: ${PORTA:-7700}
       STOAT_URL: ${STOAT_URL:-}
       AGENTE_SEGREDO: ${AGENTE_SEGREDO:-}
       BATIMENTO_MS: ${BATIMENTO_MS:-15000}
@@ -39,12 +57,6 @@ services:
 
     security_opt:
       - no-new-privileges:true
-
-    # Permite alcançar um Stoat rodando na máquina anfitriã, que é o caso
-    # durante o desenvolvimento (o backend nativo escuta em :14702). Em
-    # produção o STOAT_URL é um endereço público e isto fica sem uso.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
     logging:
       driver: json-file

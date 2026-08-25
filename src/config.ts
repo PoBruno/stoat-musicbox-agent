@@ -33,6 +33,16 @@ export const config = {
   porta: numero("PORTA", 7700),
 
   /**
+   * Em qual endereço a API escuta.
+   *
+   * Importa por causa da rede de anfitrião: sem mapeamento de porta para
+   * limitar o alcance, quem decide se isto fica acessível de fora é este
+   * valor. O padrão é só a própria máquina — um extrator aberto na rede é um
+   * proxy de download para quem quiser.
+   */
+  endereco: texto("ENDERECO", "127.0.0.1"),
+
+  /**
    * Endereço da instância do Stoat.
    *
    * Opcional: sem ele o agente ainda sobe e resolve, só não se registra.

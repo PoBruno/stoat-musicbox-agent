@@ -105,8 +105,8 @@ export function subirHttp(ultimoDiagnostico: () => Diagnostico | null) {
     }
   });
 
-  servidor.listen(config.porta, "0.0.0.0", () => {
-    console.log(`[http] ouvindo em :${config.porta}`);
+  servidor.listen(config.porta, config.endereco, () => {
+    console.log(`[http] ouvindo em ${config.endereco}:${config.porta}`);
   });
 
   return servidor;
