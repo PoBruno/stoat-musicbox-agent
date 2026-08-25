@@ -3,16 +3,29 @@ name: musicbox-agent
 # Compose de PRODUCAO, para rodar no CT de casa (/mnt/stoat/musicbox-agent).
 #
 # Diferente do de desenvolvimento em dois pontos:
-#   - a imagem vem do registry, ja construida, em vez de `build: .`
+#   - a imagem e nomeada, em vez de `build: .`
 #   - o STOAT_URL aponta para a instancia publica
 #
 # O resto do desenho e o mesmo: o agente procura o servidor (vive atras de
 # NAT), e o audio vai daqui direto para o LiveKit -- a VPS nunca ve um byte
 # de musica.
+#
+# ATUALIZAR: e esta maquina que constroi a imagem, porque e ela que tem o IP
+# residencial que o YouTube aceita. Sao tres passos, e o `docker compose build`
+# NAO e um deles -- nao ha `build:` aqui, entao ele nao faz nada:
+#
+#   git pull
+#   docker build -t musicbox-agent:local .
+#   docker compose -f compose.prod.yml up -d --force-recreate
+#
+# MUSICBOX_IMAGE precisa estar no .env apontando para essa tag. O padrao abaixo
+# e uma imagem que nunca foi publicada; deixar o .env sem a variavel faz o
+# compose tentar baixa-la e falhar com "pull access denied", que parece
+# problema de credencial e nao e.
 
 services:
   agente:
-    image: ${MUSICBOX_IMAGE:-lorthe/musicbox-agent:latest}
+    image: ${MUSICBOX_IMAGE:-musicbox-agent:local}
     restart: unless-stopped
 
     # Rede do anfitriao, e isto merece explicacao porque abre mao de
