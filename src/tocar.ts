@@ -53,7 +53,49 @@ let atual: {
   ytdlp: ChildProcess;
   ffmpeg: ChildProcess;
   cancelado: boolean;
+  /** Falso depois de a fonte recusar quadros; o cano segue drenando */
+  emitindo: boolean;
+  canal: string;
+  /** Quadros já emitidos, que é como sabemos a posição */
+  quadros: number;
+  relogio: NodeJS.Timeout | null;
+  /** Guardado para poder desligar de verdade, e não só sinalizar */
+  aoReceber: ((b: Buffer) => void) | null;
 } | null = null;
+
+/**
+ * Conta ao servidor onde a faixa está, e quando ela acabou.
+ *
+ * A posição vem dos quadros emitidos, não do relógio de parede: se a extração
+ * engasgar, o relógio continua andando e a barra passaria a mentir. Quadro
+ * emitido é áudio que de fato saiu.
+ */
+async function reportar(
+  canal: string,
+  posicaoS: number,
+  terminou: boolean,
+): Promise<void> {
+  if (!config.stoatUrl || !config.segredo) return;
+
+  try {
+    await fetch(`${config.stoatUrl}/musicbox/agent/progress`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-musicbox-secret": config.segredo,
+      },
+      body: JSON.stringify({
+        channel_id: canal,
+        position_s: Math.floor(posicaoS),
+        finished: terminou,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (erro) {
+    // Falhar o aviso não pode derrubar a música que está tocando.
+    console.error(`[tocar] nao consegui reportar: ${erro}`);
+  }
+}
 
 /** Pede ao servidor a credencial de entrada na sala. */
 async function pegarToken(canalId: string): Promise<{ token: string; url: string }> {
@@ -87,6 +129,16 @@ export async function parar(): Promise<void> {
   if (!agora) return;
   atual = null;
   agora.cancelado = true;
+
+  if (agora.relogio) clearInterval(agora.relogio);
+
+  // Desliga o ouvinte de verdade, em vez de confiar numa bandeira. Enquanto
+  // ele continuava inscrito, cada bloco que chegava reiniciava o laço de
+  // emissão contra uma fonte de áudio já desligada, e o LiveKit respondia
+  // `InvalidState` a cada quadro.
+  if (agora.aoReceber) {
+    agora.ffmpeg.stdout?.off("data", agora.aoReceber);
+  }
 
   // Desliga o cano ANTES de matar. O yt-dlp escreve na entrada do ffmpeg; se
   // o ffmpeg morrer com o cano ligado, a escrita seguinte dispara `EPIPE` num
@@ -185,7 +237,18 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
   ytdlp.on("error", engolirCanoQuebrado("yt-dlp"));
   ffmpeg.on("error", engolirCanoQuebrado("ffmpeg"));
 
-  const eu = { sala, fonte, ytdlp, ffmpeg, cancelado: false };
+  const eu = {
+    sala,
+    fonte,
+    ytdlp,
+    ffmpeg,
+    cancelado: false,
+    emitindo: true,
+    canal: canalId,
+    quadros: 0,
+    relogio: null as NodeJS.Timeout | null,
+    aoReceber: null as ((b: Buffer) => void) | null,
+  };
   atual = eu;
   estado = {
     tocando: true,
@@ -194,6 +257,13 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
     desde: new Date().toISOString(),
   };
   console.log(`[tocar] "${faixa.titulo}" no canal ${canalId}`);
+
+  // A cada 5 s, e não a cada segundo: o servidor projeta a posição entre um
+  // aviso e outro, então avisar mais vezes só gastaria requisição.
+  eu.relogio = setInterval(() => {
+    if (atual !== eu) return;
+    void reportar(canalId, eu.quadros / 100, false);
+  }, 5_000);
 
   ffmpeg.stderr?.on("data", (b: Buffer) => {
     const texto = b.toString().trim();
@@ -209,10 +279,16 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
   let sobra: Buffer<ArrayBuffer> = Buffer.alloc(0) as Buffer<ArrayBuffer>;
   const saida = ffmpeg.stdout!;
 
-  saida.on("data", (bloco: Buffer) => {
+  const aoReceber = (bloco: Buffer) => {
     sobra = (
       sobra.length ? Buffer.concat([sobra, bloco]) : bloco
     ) as Buffer<ArrayBuffer>;
+
+    // Fonte recusou antes: consome e joga fora, para o ffmpeg poder terminar.
+    if (!eu.emitindo) {
+      sobra = Buffer.alloc(0) as Buffer<ArrayBuffer>;
+      return;
+    }
 
     if (sobra.length < BYTES_POR_QUADRO) return;
 
@@ -223,7 +299,12 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
         // está no ar, e o laço da faixa velha precisa perceber que perdeu a
         // vez. Sem isso ele segue alimentando uma fonte de áudio já
         // desligada, e o LiveKit responde `InvalidState` a cada quadro.
-        while (sobra.length >= BYTES_POR_QUADRO && !eu.cancelado && atual === eu) {
+        while (
+          sobra.length >= BYTES_POR_QUADRO &&
+          !eu.cancelado &&
+          eu.emitindo &&
+          atual === eu
+        ) {
           const quadro = sobra.subarray(0, BYTES_POR_QUADRO);
           sobra = sobra.subarray(BYTES_POR_QUADRO) as Buffer<ArrayBuffer>;
           await fonte.captureFrame(
@@ -239,21 +320,40 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
               AMOSTRAS_POR_QUADRO,
             ),
           );
+          eu.quadros++;
         }
       } catch (erro) {
-        // Depois de parar, falhar é o esperado: a fonte já foi embora.
-        if (!eu.cancelado && atual === eu) {
-          console.error(`[tocar] falha ao emitir: ${erro}`);
+        // A fonte de áudio pode parar de aceitar quadros — tipicamente no fim
+        // da faixa, quando a sala se desliga. Insistir renderia dezenas de
+        // linhas iguais, então paramos de emitir.
+        //
+        // Mas parar de emitir NÃO pode parar de consumir: com o fluxo pausado
+        // o ffmpeg enche o cano, nunca encerra, e o fim da faixa nunca é
+        // reportado — a fila congela para todo mundo. Daqui em diante o que
+        // chega é descartado, só para o processo poder terminar.
+        eu.emitindo = false;
+        if (atual === eu) {
+          console.error(`[tocar] a fonte parou de aceitar audio: ${erro}`);
         }
       } finally {
-        if (!eu.cancelado && atual === eu) saida.resume();
+        if (atual === eu) saida.resume();
       }
     })();
-  });
+  };
+
+  eu.aoReceber = aoReceber;
+  saida.on("data", aoReceber);
 
   ffmpeg.on("close", () => {
     // Só encerra se ainda for a tocada corrente: uma faixa nova pode ter
     // começado enquanto esta terminava.
-    if (atual === eu) void parar();
+    if (atual !== eu) return;
+
+    // Avisa que acabou ANTES de parar. É este aviso que faz o servidor puxar
+    // a próxima da fila; `parar()` apaga o estado e o canal se perderia.
+    const segundos = eu.quadros / 100;
+    void reportar(canalId, segundos, true).finally(() => {
+      if (atual === eu) void parar();
+    });
   });
 }
