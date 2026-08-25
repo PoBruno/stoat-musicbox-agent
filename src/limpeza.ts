@@ -19,35 +19,42 @@ import { join } from "node:path";
  * SIGTERM antes de SIGKILL, para que ele consiga limpar sozinho.
  */
 export async function limparRestosDeExtracao(): Promise<number> {
-  const base = process.env.HOME || tmpdir();
+  // Varre os dois lugares. O extrator escolhe onde desempacotar olhando HOME
+  // e o diretório temporário do sistema, e nem sempre são o mesmo: no
+  // container os restos apareceram em /tmp enquanto HOME apontava para outro
+  // caminho. Procurar só num deles deixaria a sujeira onde ela está.
+  const candidatos = [...new Set([process.env.HOME, tmpdir()].filter(Boolean))];
   let removidas = 0;
 
-  let entradas: string[];
-  try {
-    entradas = await readdir(base);
-  } catch {
-    return 0;
-  }
+  // Só toca no que tem a cara de uma extração do PyInstaller: o prefixo `_MEI`
+  // seguido do sufixo sorteado, que mistura letras e dígitos (`_MEIvebquD`).
+  // Varrer o diretório inteiro apagaria coisa de outros.
+  const molde = /^_MEI\w+$/;
 
-  // Só toca no que tem a cara de uma extração do PyInstaller: prefixo `_MEI`
-  // seguido de dígitos. Varrer o diretório inteiro apagaria coisa de outros.
-  const molde = /^_MEI\d+$/;
-
-  for (const nome of entradas) {
-    if (!molde.test(nome)) continue;
-
-    const caminho = join(base, nome);
+  for (const base of candidatos as string[]) {
+    let entradas: string[];
     try {
-      const info = await stat(caminho);
-      if (!info.isDirectory()) continue;
-
-      // Deixa em paz o que foi criado agora: pode ser uma extração em uso.
-      if (Date.now() - info.mtimeMs < 60_000) continue;
-
-      await rm(caminho, { recursive: true, force: true });
-      removidas++;
+      entradas = await readdir(base);
     } catch {
-      // Em uso ou já removida por outro caminho; não é motivo para parar.
+      continue;
+    }
+
+    for (const nome of entradas) {
+      if (!molde.test(nome)) continue;
+
+      const caminho = join(base, nome);
+      try {
+        const info = await stat(caminho);
+        if (!info.isDirectory()) continue;
+
+        // Deixa em paz o que foi criado agora: pode ser uma extração em uso.
+        if (Date.now() - info.mtimeMs < 60_000) continue;
+
+        await rm(caminho, { recursive: true, force: true });
+        removidas++;
+      } catch {
+        // Em uso ou já removida por outro caminho; não é motivo para parar.
+      }
     }
   }
 
