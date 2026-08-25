@@ -146,10 +146,22 @@ export async function parar(): Promise<void> {
   // processo inteiro caindo.
   agora.ytdlp.stdout?.unpipe();
 
-  // SIGKILL e não SIGTERM no yt-dlp: ele ignora o pedido educado enquanto
-  // está escrevendo, e o processo ficaria vivo segurando a conexão.
-  agora.ytdlp.kill("SIGKILL");
-  agora.ffmpeg.kill("SIGKILL");
+  // SIGTERM antes de SIGKILL, e isto não é polidez.
+  //
+  // O yt-dlp autônomo desempacota as próprias bibliotecas numa pasta temporária
+  // e a remove ao encerrar. Morto à força, ele não remove — e como isto roda a
+  // cada troca de faixa, as pastas se acumulavam até encher os 256 MB de /tmp.
+  // A partir daí toda extração falha com "Failed to extract entry", que culpa
+  // uma biblioteca em vez do disco cheio.
+  agora.ytdlp.kill("SIGTERM");
+  agora.ffmpeg.kill("SIGTERM");
+
+  // Rede de segurança: se não saírem sozinhos, força.
+  const forcar = setTimeout(() => {
+    agora.ytdlp.kill("SIGKILL");
+    agora.ffmpeg.kill("SIGKILL");
+  }, 2_000);
+  agora.ytdlp.once("exit", () => clearTimeout(forcar));
 
   try {
     await agora.sala.disconnect();

@@ -1,6 +1,7 @@
 import { config } from "./config.ts";
 import { atualizarYtdlp, diagnosticar, type Diagnostico } from "./diagnostico.ts";
 import { subirHttp } from "./http.ts";
+import { limparRestosDeExtracao } from "./limpeza.ts";
 import { manterBatimento } from "./registro.ts";
 import { manterTrabalho } from "./trabalho.ts";
 
@@ -16,6 +17,11 @@ let ultimoDiagnostico: Diagnostico | null = null;
 
 async function principal() {
   console.log("[agente] iniciando");
+
+  // Antes de qualquer coisa: um /tmp cheio faz toda extração falhar, e a
+  // mensagem do yt-dlp culpa uma biblioteca em vez de dizer que acabou espaço.
+  const restos = await limparRestosDeExtracao();
+  if (restos) console.log(`[agente] removi ${restos} resto(s) de extração`);
 
   if (config.atualizarYtdlp) {
     console.log(`[agente] atualizando yt-dlp: ${await atualizarYtdlp()}`);
@@ -55,9 +61,21 @@ async function principal() {
     30 * 60_000,
   );
 
+  // Varre restos de extração periodicamente. O encerramento com SIGTERM
+  // resolve o caso normal, mas container morto no meio de um download não
+  // avisa ninguém — e basta meia dúzia de restos para encher /tmp.
+  const faxina = setInterval(
+    async () => {
+      const n = await limparRestosDeExtracao();
+      if (n) console.log(`[agente] faxina: ${n} resto(s) removido(s)`);
+    },
+    15 * 60_000,
+  );
+
   const encerrar = (sinal: string) => {
     console.log(`[agente] ${sinal}, encerrando`);
     clearInterval(revalidacao);
+    clearInterval(faxina);
     pararBatimento();
     pararTrabalho();
     process.exit(0);
