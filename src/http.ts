@@ -52,8 +52,10 @@ export function subirHttp(ultimoDiagnostico: () => Diagnostico | null) {
           if (!consulta) {
             return responder(400, { erro: "faltou o parâmetro q" });
           }
+          // O teto é alto porque uma playlist inteira é um pedido legítimo;
+          // existe só para um endereço maldoso não virar uma resposta sem fim.
           const limite = Number(url.searchParams.get("limite") ?? 5);
-          const faixas = await resolver(consulta, Math.min(limite, 20));
+          const faixas = await resolver(consulta, Math.min(limite, 200));
           return responder(200, { total: faixas.length, faixas });
         }
 

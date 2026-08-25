@@ -19,10 +19,6 @@ export function estadoDoRegistro(): Estado {
  * Quem inicia a conversa é sempre o agente, nunca o servidor. O agente vive
  * atrás do NAT da casa: o servidor não tem como alcançá-lo, e nada de abrir
  * porta no roteador para resolver isso.
- *
- * A rota ainda não existe no backend. Enquanto não existir, o agente registra
- * o motivo e segue funcionando — dá para validar a extração nesta máquina sem
- * depender de o servidor estar pronto.
  */
 async function bater(diagnostico: Diagnostico): Promise<void> {
   estado.ultimaTentativa = new Date().toISOString();
@@ -36,21 +32,23 @@ async function bater(diagnostico: Diagnostico): Promise<void> {
     return;
   }
 
+  // O batimento não leva diagnóstico: se este agente não consegue falar com o
+  // YouTube, ele não deve se anunciar como disponível. Bater ponto dizendo
+  // "estou aqui mas não funciono" faria o servidor mandar trabalho que só
+  // pode falhar.
+  if (!diagnostico.ok) {
+    estado = {
+      registrado: false,
+      ultimaTentativa: estado.ultimaTentativa,
+      motivo: `não me anuncio sem conseguir extrair: ${diagnostico.youtube.motivo ?? "sem detalhe"}`,
+    };
+    return;
+  }
+
   try {
-    const resposta = await fetch(`${config.stoatUrl}/api/musicbox/agente/batimento`, {
+    const resposta = await fetch(`${config.stoatUrl}/musicbox/agent/heartbeat`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.segredo}`,
-      },
-      body: JSON.stringify({
-        pronto: diagnostico.ok,
-        provedores: diagnostico.ok ? ["youtube"] : [],
-        // O servidor precisa saber a diferença entre "está fora do ar" e
-        // "está de pé mas o YouTube recusou o IP" — as duas pedem mensagens
-        // diferentes para quem estiver tentando ouvir música.
-        motivo: diagnostico.ok ? undefined : diagnostico.youtube.motivo,
-      }),
+      headers: { "x-musicbox-secret": config.segredo },
       signal: AbortSignal.timeout(10_000),
     });
 
@@ -65,7 +63,9 @@ async function bater(diagnostico: Diagnostico): Promise<void> {
       motivo:
         resposta.status === 404
           ? "rota ainda não existe no servidor"
-          : `servidor respondeu ${resposta.status}`,
+          : resposta.status === 401
+            ? "o servidor recusou o segredo"
+            : `servidor respondeu ${resposta.status}`,
     };
   } catch (erro) {
     estado = {

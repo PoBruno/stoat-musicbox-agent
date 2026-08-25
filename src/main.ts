@@ -2,6 +2,7 @@ import { config } from "./config.ts";
 import { atualizarYtdlp, diagnosticar, type Diagnostico } from "./diagnostico.ts";
 import { subirHttp } from "./http.ts";
 import { manterBatimento } from "./registro.ts";
+import { manterTrabalho } from "./trabalho.ts";
 
 /**
  * Agente MusicBox.
@@ -39,6 +40,11 @@ async function principal() {
   subirHttp(() => ultimoDiagnostico);
   const pararBatimento = manterBatimento(() => ultimoDiagnostico);
 
+  // Só busca trabalho se conseguir fazê-lo. Pendurar-se no servidor sem
+  // conseguir extrair faria os pedidos irem para uma máquina que só sabe
+  // devolver erro.
+  const pararTrabalho = youtube.alcancavel ? manterTrabalho() : () => {};
+
   // Revalida de tempos em tempos: um IP pode ser desafiado depois de horas
   // funcionando, e o servidor precisa saber disso sem esperar alguém tentar
   // tocar uma música.
@@ -53,6 +59,7 @@ async function principal() {
     console.log(`[agente] ${sinal}, encerrando`);
     clearInterval(revalidacao);
     pararBatimento();
+    pararTrabalho();
     process.exit(0);
   };
 
