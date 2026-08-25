@@ -1,0 +1,65 @@
+name: musicbox-agent
+
+# Compose de PRODUCAO, para rodar no CT de casa (/mnt/stoat/musicbox-agent).
+#
+# Diferente do de desenvolvimento em dois pontos:
+#   - a imagem vem do registry, ja construida, em vez de `build: .`
+#   - o STOAT_URL aponta para a instancia publica
+#
+# O resto do desenho e o mesmo: o agente procura o servidor (vive atras de
+# NAT), e o audio vai daqui direto para o LiveKit -- a VPS nunca ve um byte
+# de musica.
+
+services:
+  agente:
+    image: ${MUSICBOX_IMAGE:-lorthe/musicbox-agent:latest}
+    restart: unless-stopped
+
+    # Rede do anfitriao, e isto merece explicacao porque abre mao de
+    # isolamento.
+    #
+    # Midia RTC nao passa por mapeamento de porta: o LiveKit anuncia nos
+    # candidatos ICE o endereco onde acha que esta, e o agente precisa
+    # responder de um endereco alcancavel. Em ponte, a sinalizacao conecta e
+    # a midia morre -- o que parece erro de credencial e nao e.
+    network_mode: host
+
+    environment:
+      # Em rede de anfitriao nao ha mapeamento de porta para limitar alcance;
+      # quem limita e este endereco. A API e so de diagnostico, e um extrator
+      # aberto na rede vira proxy de download para quem quiser.
+      ENDERECO: 127.0.0.1
+      PORTA: ${PORTA:-7700}
+
+      STOAT_URL: ${STOAT_URL:?defina STOAT_URL no .env}
+      AGENTE_SEGREDO: ${AGENTE_SEGREDO:?defina AGENTE_SEGREDO no .env}
+
+      BATIMENTO_MS: ${BATIMENTO_MS:-15000}
+      # Atualiza o yt-dlp na partida. O YouTube muda de proposito, e versao
+      # velha e a causa mais comum de "parou de funcionar do nada".
+      ATUALIZAR_YTDLP: ${ATUALIZAR_YTDLP:-1}
+
+    # Extracao e rajada curta, nao trabalho continuo. O teto existe para que
+    # uma faixa problematica nao coma o CT inteiro.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+    # O yt-dlp e o ffmpeg escrevem em /tmp. Em memoria, e pequeno.
+    #
+    # O `exec` e obrigatorio: o binario autonomo do yt-dlp extrai as proprias
+    # bibliotecas para o HOME e as mapeia como executaveis. Sem ele a falha e
+    # "libz.so.1: failed to map segment", que culpa uma biblioteca em vez da
+    # montagem.
+    tmpfs:
+      - /tmp:size=256m,exec
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

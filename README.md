@@ -1,130 +1,119 @@
 # Agente MusicBox
 
-Extrator de áudio para o MusicBox do Stoat, feito para rodar **na sua rede
-doméstica** — tipicamente um container no Proxmox.
+Extrai áudio para o [STOAT](https://github.com/PoBruno) tocar dentro de uma
+chamada de voz.
 
-## Por que ele existe
+## Por que isto existe
 
-O YouTube recusa requisições vindas do IP da VPS:
-
-```
-Sign in to confirm you're not a bot.
-```
-
-Isso foi medido, não suposto. Onze clientes InnerTube diferentes foram testados
-a partir da VPS e todos receberam o mesmo desafio. O **mesmo binário, no mesmo
-vídeo, no mesmo minuto**, a partir de uma conexão residencial, resolveu sem
-reclamar.
-
-O que separa os dois casos é o IP. Este agente existe para que a extração
-aconteça de um endereço residencial.
-
-## O que ele NÃO faz
-
-Ele não é um servidor de música. A fila, as playlists, as permissões e a
-interface vivem no Stoat. O agente só resolve endereços e entrega áudio.
-
-Também **não repassa áudio pela VPS**: ele fala direto com o LiveKit, que já é
-público. A máquina do servidor nunca vê um byte de música — o que importa
-quando ela tem 1 GB de RAM.
+O YouTube recusa requisições vindas do IP da VPS que hospeda o servidor:
 
 ```
-   [ este agente, em casa ]
-     │
-     ├── controle ──────────▶ Stoat  (fila, comandos, quem pode o quê)
-     │                        VPS, sem áudio
-     │
-     └── áudio ─────────────▶ LiveKit
-                              direto, sem passar pela VPS
+Sign in to confirm you're not a bot
 ```
 
-## Estado atual
+Foram testados onze clientes internos diferentes do YouTube, e todos falham.
+Da mesma máquina, no mesmo minuto, uma conexão residencial resolve o mesmo
+vídeo sem reclamar. Não é o programa que está errado — é o endereço.
 
-Honestamente, o que está pronto e o que não está:
+Então a extração sai do servidor e vai para uma máquina em casa. Este agente
+é essa máquina.
 
-| Parte | Estado |
-|---|---|
-| Verificação das ferramentas na partida | **pronto** |
-| Resolver busca ou URL em faixas | **pronto** |
-| Produzir fluxo Opus | **pronto** |
-| API local de saúde e diagnóstico | **pronto** |
-| Batimento para o Stoat | **pronto**, tolera o servidor não ter a rota ainda |
-| Publicar no LiveKit | **falta** — depende das rotas no backend |
-| Fila e comandos | **falta** — vive no Stoat, não aqui |
+## Como se encaixa
 
-O agente é útil desde já: dá para subir, apontar o navegador para a porta dele
-e confirmar que a extração funciona na sua rede antes de existir qualquer código
-no servidor.
+```
+navegador  ──►  servidor STOAT  ──►  agente (em casa)  ──►  YouTube
+                      │                    │
+                      └────────────────────┴──►  LiveKit  ──►  quem ouve
+```
 
-## Subindo no Proxmox
+Dois detalhes do desenho valem explicação:
 
-Num container LXC com Docker, ou em qualquer máquina com Docker:
+**O agente é sempre quem inicia a conversa.** Ele vive atrás do NAT de uma
+casa e não aceita conexões de fora — nada de abrir porta no roteador. Ele fica
+pendurado numa requisição ao servidor esperando trabalho, e a resposta chega
+no instante em que houver.
+
+**O áudio nunca passa pelo servidor.** Ele vai desta máquina direto para o
+LiveKit. A VPS não vê um byte de música, o que é o que torna isso viável numa
+máquina de 1 GB.
+
+## Requisitos
+
+- Docker e Docker Compose
+- Uma conexão residencial (o ponto todo)
+- Alcance à instância do STOAT e ao servidor de voz dela
+
+## Instalação
 
 ```bash
-git clone <este repositorio> musicbox-agent
+git clone https://github.com/PoBruno/stoat-musicbox-agent.git musicbox-agent
 cd musicbox-agent
 cp .env.example .env
-# edite o .env: no mínimo AGENTE_SEGREDO e STOAT_URL
-docker compose up -d
 ```
 
-Conferir se subiu:
+Preencha o `.env`:
+
+| Variável | O que é |
+|---|---|
+| `STOAT_URL` | endereço da API, ex. `https://sua.instancia/api` |
+| `AGENTE_SEGREDO` | o mesmo valor de `REVOLT__MUSICBOX__AGENT_SECRET` no servidor |
+
+Depois:
 
 ```bash
-curl http://localhost:7700/saude
+docker compose up -d --build
+curl http://127.0.0.1:7700/saude
 ```
 
-Deve responder algo como:
+A resposta diz se este endereço consegue falar com o YouTube:
 
 ```json
 {
   "ok": true,
-  "ferramentas": { "ytdlp": "2026.08.19", "ffmpeg": "4.4.2" },
-  "youtube": { "alcancavel": true },
-  "stoat": { "registrado": false, "motivo": "rota ainda não existe no servidor" }
+  "youtube": { "alcancavel": true, "ms": 2096 },
+  "stoat": { "registrado": true }
 }
 ```
 
-O campo que importa é **`youtube.alcancavel`**. Se vier `false`, o IP desta
-máquina também está sendo desafiado, e o agente não resolve nada — melhor
-descobrir agora que depois.
+`alcancavel: false` significa que este IP também está sendo recusado, e o
+agente não vai servir aqui.
 
-### Requisitos do container
+## No lado do servidor
 
-- Docker, e nada mais.
-- Saída para a internet **sem** proxy corporativo ou VPN de datacenter. Uma VPN
-  comercial provavelmente reproduz o mesmo bloqueio da VPS.
-- ~200 MB de RAM. Medido: `yt-dlp` e `ffmpeg` juntos deram pico de 56 MB por
-  faixa; o resto é folga para o Node e picos.
+```
+REVOLT__MUSICBOX__AGENT_SECRET=<mesmo segredo>
+REVOLT__MUSICBOX__BOT_USER_ID=<id de uma conta de bot>
+```
 
-### Sobre LXC no Proxmox
+O bot dá nome e rosto ao MusicBox dentro da chamada, editáveis pelas telas que
+o STOAT já tem. Sem ele o agente entra com uma identidade sintética, toca
+igual, mas aparece sem avatar.
 
-Se o container for **não-privilegiado**, Docker dentro dele exige
-`nesting=1` nas opções do CT. Se preferir evitar isso, uma VM pequena resolve.
+## Diagnóstico
 
-## Ajustes
+A API local só escuta em `127.0.0.1` de propósito: um extrator aberto na rede
+é um proxy de download para quem quiser.
 
-Tudo pelo `.env`. Os que importam:
-
-| Variável | Para quê |
+| Rota | Para quê |
 |---|---|
-| `AGENTE_SEGREDO` | O mesmo valor configurado no Stoat. É o que prova que o agente é seu |
-| `STOAT_URL` | Endereço da sua instância, ex. `https://discord.monga.dev.br` |
-| `PORTA` | Porta da API local. Padrão `7700` |
-| `ATUALIZAR_YTDLP` | `1` para atualizar o `yt-dlp` a cada partida |
+| `GET /saude` | este IP funciona? as ferramentas estão aí? |
+| `GET /resolver?q=` | resolve um nome, um vídeo ou uma playlist |
+| `GET /medir?q=` | quanto uma faixa custa de CPU e banda nesta máquina |
 
-## Manutenção
+## Notas de operação
 
-**O `yt-dlp` quebra periodicamente**, porque o YouTube muda de propósito. A
-correção costuma sair em dias. Com `ATUALIZAR_YTDLP=1` o agente busca a versão
-nova sempre que reinicia, o que transforma a correção num `docker compose
-restart`.
+**Rede de anfitrião não é descuido.** Mídia RTC não passa por mapeamento de
+porta: o servidor de voz anuncia nos candidatos ICE o endereço onde acha que
+está, e em rede em ponte a sinalização conecta enquanto a mídia morre — o que
+parece erro de credencial e não é.
 
-Se o agente parar de resolver, o `/saude` diz se o problema é ferramenta velha
-ou bloqueio de rede — são coisas diferentes e o remédio é diferente.
+**O `yt-dlp` se atualiza na partida.** O YouTube muda de propósito, e versão
+velha é a causa mais comum de "parou de funcionar do nada". Para desligar,
+`ATUALIZAR_YTDLP=0`.
 
-## Uma escolha consciente
+**Uma faixa por vez, por instância.** A fila e a ordem vivem no servidor; aqui
+só se extrai e publica.
 
-Extrair áudio do YouTube por fora do player oficial contraria os termos de uso
-deles. Para um grupo fechado o risco prático é baixo, mas é uma escolha, e vale
-tê-la feito de olhos abertos em vez de por acidente.
+## Licença
+
+Mesma do projeto STOAT.
