@@ -43,7 +43,12 @@ async function principal() {
     console.error(`[agente] NÃO vou conseguir extrair: ${youtube.motivo}`);
   }
 
-  subirHttp(() => ultimoDiagnostico);
+  subirHttp(
+    () => ultimoDiagnostico,
+    (diagnostico) => {
+      ultimoDiagnostico = diagnostico;
+    },
+  );
   const pararBatimento = manterBatimento(() => ultimoDiagnostico);
 
   // Só busca trabalho se conseguir fazê-lo. Pendurar-se no servidor sem

@@ -16,7 +16,10 @@ import { estadoDoRegistro } from "./registro.ts";
  * Fica ligada só na rede local: expor um extrator na internet seria dar a
  * qualquer um um proxy de download.
  */
-export function subirHttp(ultimoDiagnostico: () => Diagnostico | null) {
+export function subirHttp(
+  ultimoDiagnostico: () => Diagnostico | null,
+  guardarDiagnostico: (diagnostico: Diagnostico) => void,
+) {
   const servidor = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${config.porta}`);
 
@@ -40,7 +43,18 @@ export function subirHttp(ultimoDiagnostico: () => Diagnostico | null) {
             cache &&
             Date.now() - Date.parse(cache.verificadoEm) < 5 * 60_000;
 
-          const diag = recente ? cache : await diagnosticar();
+          // O diagnóstico refeito aqui PRECISA voltar para o cache. Sem isso
+          // o cache só renovava na revalidação de 30 min, e em 25 de cada 30
+          // minutos todo healthcheck (60 s) rodava o yt-dlp duas vezes e
+          // consultava o YouTube. Cada execução do binário autônomo extrai
+          // ~40 MB em /tmp: foram ~240 GB gravados por dia em produção.
+          let diag: Diagnostico;
+          if (cache && recente) {
+            diag = cache;
+          } else {
+            diag = await diagnosticar();
+            guardarDiagnostico(diag);
+          }
           return responder(diag.ok ? 200 : 503, {
             ...diag,
             stoat: estadoDoRegistro(),
