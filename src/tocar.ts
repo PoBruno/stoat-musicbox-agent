@@ -180,7 +180,11 @@ export async function parar(): Promise<void> {
  * byte de música. É o que torna viável extrair de uma conexão residencial sem
  * transformar a VPS em intermediária de mídia.
  */
-export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
+export async function tocar(
+  canalId: string,
+  faixa: Faixa,
+  tentativa = 1,
+): Promise<void> {
   await parar();
 
   const fonteDeAudio = fontes.get(faixa.provedor);
@@ -361,11 +365,73 @@ export async function tocar(canalId: string, faixa: Faixa): Promise<void> {
     // começado enquanto esta terminava.
     if (atual !== eu) return;
 
+    const segundos = eu.quadros / 100;
+
+    // Quase nenhum audio saiu: isso e falha, nao fim de musica. Antes o
+    // agente avisava "terminou" e o servidor puxava a proxima, que falhava
+    // igual; com o YouTube recusando o download (403), uma playlist de 100
+    // faixas era "tocada" inteira em dez minutos, sem um segundo de som.
+    if (segundos < SEGUNDOS_MINIMOS) {
+      void falhouSemAudio(canalId, faixa, tentativa);
+      return;
+    }
+
+    falhasSeguidas = 0;
     // Avisa que acabou ANTES de parar. É este aviso que faz o servidor puxar
     // a próxima da fila; `parar()` apaga o estado e o canal se perderia.
-    const segundos = eu.quadros / 100;
     void reportar(canalId, segundos, true).finally(() => {
       if (atual === eu) void parar();
     });
   });
+}
+
+/** Menos audio que isto ao encerrar nao e uma musica que acabou. */
+const SEGUNDOS_MINIMOS = 1;
+
+/** Faixas seguidas sem audio antes de desistir de avancar a fila. */
+const DESISTIR_APOS = 3;
+
+let falhasSeguidas = 0;
+
+/**
+ * Uma faixa encerrou sem audio.
+ *
+ * Tenta de novo uma vez (o endereco direto pode ter vindo ruim), depois pula
+ * para a proxima. Se varias seguidas falham, o problema nao e a faixa, e o
+ * download inteiro: para de avancar e deixa a fila como esta, para alguem
+ * tentar de novo quando voltar, em vez de consumir a fila em silencio.
+ */
+async function falhouSemAudio(
+  canalId: string,
+  faixa: Faixa,
+  tentativa: number,
+): Promise<void> {
+  if (tentativa < 2) {
+    console.error(`[tocar] "${faixa.titulo}" sem audio; tentando de novo`);
+    try {
+      await tocar(canalId, faixa, tentativa + 1);
+      return;
+    } catch (erro) {
+      console.error(`[tocar] nova tentativa falhou: ${erro}`);
+    }
+  }
+
+  falhasSeguidas++;
+  if (falhasSeguidas >= DESISTIR_APOS) {
+    console.error(
+      `[tocar] ${falhasSeguidas} faixas seguidas sem audio; parei de avancar a fila (o download do YouTube esta falhando)`,
+    );
+    // Zera: quem apertar tocar/proxima depois ganha mais tres tentativas.
+    falhasSeguidas = 0;
+    await reportar(canalId, 0, false);
+    await parar();
+    return;
+  }
+
+  console.error(`[tocar] "${faixa.titulo}" sem audio; pulando`);
+  // O aviso faz o servidor mandar a proxima, que pode chegar antes desta
+  // linha terminar: so para o que ainda for esta tocada.
+  const esta = atual;
+  await reportar(canalId, 0, true);
+  if (atual === esta) await parar();
 }
