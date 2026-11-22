@@ -83,7 +83,15 @@ function classificar(erro: string): ErroDeProvedor["motivo"] {
   if (
     texto.includes("video unavailable") ||
     texto.includes("private video") ||
-    texto.includes("does not exist")
+    texto.includes("does not exist") ||
+    // Playlist privada, "Curtidos"/"Assistir mais tarde" (sao da conta de
+    // quem colou, o agente nao enxerga) e Mix que expirou.
+    texto.includes("playlist is private") ||
+    texto.includes("unviewable") ||
+    texto.includes("playlist does not exist") ||
+    texto.includes("incomplete youtube id") ||
+    // Id de playlist que nao existe: o YouTube responde 400 na API da aba.
+    (texto.includes("[youtube:tab]") && texto.includes("http error 400"))
   ) {
     return "nao_encontrado";
   }
@@ -94,7 +102,56 @@ function classificar(erro: string): ErroDeProvedor["motivo"] {
 }
 
 const RE_URL_YOUTUBE =
-  /^https?:\/\/(www\.|m\.|music\.)?(youtube\.com|youtu\.be)\//i;
+  /^(https?:\/\/)?(www\.|m\.|music\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)\//i;
+
+/**
+ * Mix ("Mix - artista", lista `RD...`) e gerado pelo YouTube e nao tem fim:
+ * cada pagina traz mais recomendacoes. Sem teto proprio, colar o link de um
+ * Mix enchia a fila com 200 faixas que ninguem escolheu. 50 cobre umas tres
+ * horas, como os bots de Discord costumam carregar.
+ */
+const TETO_DO_MIX = 50;
+
+/** Titulos que o YouTube poe no lugar de video que saiu da playlist. */
+const RE_INDISPONIVEL = /^\[(private|deleted|unavailable) video\]$/i;
+
+/**
+ * Le um endereco do YouTube, aceitando o que as pessoas colam de verdade:
+ * sem `https://`, com `si=` de compartilhamento, `youtu.be/ID?list=`.
+ */
+function lerEndereco(entrada: string): URL | null {
+  const texto = entrada.trim();
+  if (!RE_URL_YOUTUBE.test(texto)) return null;
+  try {
+    return new URL(/^https?:\/\//i.test(texto) ? texto : `https://${texto}`);
+  } catch {
+    return null;
+  }
+}
+
+/** Id do video que o link aponta, se houver (`v=` ou `youtu.be/ID`). */
+function videoDoEndereco(url: URL): string | null {
+  if (url.hostname.endsWith("youtu.be")) {
+    return url.pathname.slice(1).split("/")[0] || null;
+  }
+  return url.searchParams.get("v");
+}
+
+/**
+ * Comeca a playlist pelo video do link, sem perder as anteriores.
+ *
+ * Quem copia o endereco enquanto ouve a 7a faixa de uma playlist manda
+ * `watch?v=<a 7a>&list=...`, e o yt-dlp devolve a lista desde a 1a. O que a
+ * pessoa espera e que continue dali, como o YouTube faria (o Lavalink marca
+ * isso como `selectedTrack`). As que vinham antes vao para o fim: ainda
+ * estao na fila, so nao tocam primeiro.
+ */
+function comecarPor<T extends { id: string }>(faixas: T[], id: string | null) {
+  const indice = id ? faixas.findIndex((f) => f.id === id) : -1;
+  return indice > 0
+    ? [...faixas.slice(indice), ...faixas.slice(0, indice)]
+    : faixas;
+}
 
 /**
  * Endereço da miniatura, derivado do id.
@@ -125,9 +182,13 @@ export class YouTube implements Provedor, Fonte {
   }
 
   async resolver(entrada: string, limite = 5): Promise<Faixa[]> {
-    const alvo = this.reconhece(entrada)
-      ? entrada.trim()
-      : `ytsearch${limite}:${entrada.trim()}`;
+    const url = lerEndereco(entrada);
+    const lista = url?.searchParams.get("list") ?? null;
+    // Mix: a lista comeca no proprio video, nao ha o que reordenar.
+    const ehMix = !!lista && /^RD/i.test(lista);
+    if (ehMix) limite = Math.min(limite, TETO_DO_MIX);
+
+    const alvo = url ? url.toString() : `ytsearch${limite}:${entrada.trim()}`;
 
     const { codigo, saida, erro } = await executar(
       config.ytdlp,
@@ -151,11 +212,17 @@ export class YouTube implements Provedor, Fonte {
       );
     }
 
-    return saida
+    const faixas = saida
       .split("\n")
       .filter((linha) => linha.trim().startsWith("{"))
-      .map((linha) => {
-        const cru = JSON.parse(linha) as Record<string, unknown>;
+      .map((linha) => JSON.parse(linha) as Record<string, unknown>)
+      // Video privado ou apagado continua listado na playlist, sem titulo nem
+      // duracao. Na fila ele so faria o agente falhar e pular sozinho.
+      .filter((cru) => {
+        const titulo = typeof cru.title === "string" ? cru.title.trim() : "";
+        return !!cru.id && !!titulo && !RE_INDISPONIVEL.test(titulo);
+      })
+      .map((cru) => {
         const id = String(cru.id ?? "");
         return {
           id,
@@ -170,6 +237,10 @@ export class YouTube implements Provedor, Fonte {
             `https://www.youtube.com/watch?v=${id}`,
         } satisfies Faixa;
       });
+
+    return lista && !ehMix && url
+      ? comecarPor(faixas, videoDoEndereco(url))
+      : faixas;
   }
 
   async enderecoDireto(faixa: Faixa): Promise<string> {

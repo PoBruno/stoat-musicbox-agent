@@ -128,6 +128,16 @@ async function atender(
     const mensagem = erro instanceof Error ? erro.message : String(erro);
     const motivo = erro instanceof ErroDeProvedor ? erro.motivo : "desconhecido";
     console.error(`[trabalho] ${comando.kind} falhou (${motivo}): ${mensagem}`);
+
+    // Busca por algo que nao existe (playlist privada, "Curtidos", video
+    // removido) volta como lista vazia, e nao como erro. O servidor
+    // transforma qualquer erro em 500 sem dizer o motivo; vazia, a tela
+    // consegue explicar "privada ou indisponivel" para quem colou.
+    if (comando.kind === "resolve" && motivo === "nao_encontrado") {
+      await devolver(base, segredo, { id: comando.id, tracks: [] });
+      return;
+    }
+
     await devolver(base, segredo, {
       id: comando.id,
       tracks: [],
