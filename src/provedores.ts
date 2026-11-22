@@ -244,30 +244,10 @@ export class YouTube implements Provedor, Fonte {
   }
 
   async enderecoDireto(faixa: Faixa): Promise<string> {
-    const { codigo, saida, erro } = await executar(
-      config.ytdlp,
-      [
-        "--no-warnings",
-        "--ignore-config",
-        // 251 é Opus a 48 kHz, exatamente o que o LiveKit consome. Pedir esse
-        // formato evita recodificar: Opus -> Opus perde qualidade e gasta CPU
-        // à toa. O `ba` no fim é a rede de segurança se 251 não existir.
-        "-f",
-        "251/bestaudio[acodec=opus]/ba",
-        "-g",
-        faixa.paginaUrl,
-      ],
-      { limiteMs: 30_000 },
-    );
-
-    const endereco = saida.trim().split("\n").at(-1) ?? "";
-    if (codigo !== 0 || !endereco.startsWith("https://")) {
-      throw new ErroDeProvedor(
-        erro.trim().split("\n").at(-1) ?? "não resolveu o endereço",
-        classificar(erro),
-      );
-    }
-    return endereco;
+    // A pagina, e nao o endereco do googlevideo: desde 2026-11 o YouTube
+    // recusa (403) baixar o endereco direto num segundo passo, mesmo logado.
+    // So a extracao completa, feita pelo yt-dlp que toca, recebe o audio.
+    return faixa.paginaUrl;
   }
 }
 
@@ -357,7 +337,7 @@ export class Spotify implements Provedor, Fonte {
   async enderecoDireto(faixa: Faixa): Promise<string> {
     const conhecido = espelhos.get(faixa.id);
     if (conhecido) {
-      return youtube.enderecoDireto({ ...faixa, paginaUrl: conhecido });
+      return conhecido;
     }
 
     const termo = `${faixa.autor ?? ""} ${limparTitulo(faixa.titulo)}`.trim();
@@ -400,7 +380,7 @@ export class Spotify implements Provedor, Fonte {
           `[spotify] "${termo}" (${faixa.duracaoS ?? "?"} s) -> ${id} (${achado.duracaoS ?? "?"} s)`,
         );
         lembrar(faixa.id, pagina);
-        return achado.endereco;
+        return pagina;
       }
     }
 
@@ -414,7 +394,7 @@ export class Spotify implements Provedor, Fonte {
       `[spotify] "${termo}": nenhuma duração bateu, uso o primeiro resultado`,
     );
     lembrar(faixa.id, primeiro.pagina);
-    return primeiro.endereco;
+    return primeiro.pagina;
   }
 
   /** Tipo e id, aceitando `/intl-pt/`, `?si=`, `spotify:` e link curto. */

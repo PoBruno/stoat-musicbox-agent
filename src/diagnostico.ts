@@ -1,4 +1,5 @@
 import { config } from "./config.ts";
+import { estadoDaSessao } from "./ytdlp.ts";
 import { executar } from "./executar.ts";
 import { ErroDeProvedor, YouTube } from "./provedores.ts";
 
@@ -51,6 +52,16 @@ export async function diagnosticar(): Promise<Diagnostico> {
     const faixas = await youtube.resolver(config.videoDeTeste, 1);
     if (faixas.length === 0) {
       throw new ErroDeProvedor("resolveu, mas sem faixas", "desconhecido");
+    }
+    // Sessao do YouTube: o aviso de cookies girados so sai em -v (como debug),
+    // e as chamadas normais nao usam -v. Esta usa, so para notar a queda
+    // (o aviso e lido em ytdlp.ts quando a execucao termina).
+    if (estadoDaSessao().configurada) {
+      await executar(
+        config.ytdlp,
+        ["-v", "--ignore-config", "--skip-download", "--print", "id", config.videoDeTeste],
+        { limiteMs: 60_000 },
+      );
     }
     return {
       ok: true,

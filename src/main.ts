@@ -4,6 +4,7 @@ import { subirHttp } from "./http.ts";
 import { limparRestosDeExtracao } from "./limpeza.ts";
 import { manterBatimento } from "./registro.ts";
 import { manterTrabalho } from "./trabalho.ts";
+import { carregarCookies } from "./ytdlp.ts";
 
 /**
  * Agente MusicBox.
@@ -22,6 +23,12 @@ async function principal() {
   // mensagem do yt-dlp culpa uma biblioteca em vez de dizer que acabou espaço.
   const restos = await limparRestosDeExtracao();
   if (restos) console.log(`[agente] removi ${restos} resto(s) de extração`);
+
+  console.log(
+    carregarCookies()
+      ? "[agente] cookies do YouTube carregados"
+      : "[agente] SEM cookies do YouTube: o audio deve falhar com 403",
+  );
 
   if (config.atualizarYtdlp) {
     console.log(`[agente] atualizando yt-dlp: ${await atualizarYtdlp()}`);

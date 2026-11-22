@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 
 import { config } from "./config.ts";
 import type { Faixa } from "./provedores.ts";
+import { argumentosDoYtdlp } from "./ytdlp.ts";
 
 /**
  * Abre um fluxo de áudio em Opus a partir de um endereço direto.
@@ -79,11 +80,24 @@ export function abrirFluxoOpus(
  * de opinião.
  */
 export async function medirCusto(
-  enderecoDireto: string,
+  pagina: string,
   segundos = 5,
 ): Promise<{ bytes: number; ms: number }> {
   const inicio = Date.now();
-  const { fluxo, encerrar } = abrirFluxoOpus(enderecoDireto);
+  // Mesmo caminho de quem toca: o yt-dlp extrai e baixa da pagina. Medir de
+  // outro jeito ja mentiu uma vez (o ffmpeg direto levava 403 e o tocar nao,
+  // ou o contrario).
+  const extras = argumentosDoYtdlp();
+  const processo = spawn(
+    config.ytdlp,
+    [...extras.args, "--no-warnings", "--ignore-config", "--no-playlist",
+      "-f", "251/bestaudio[acodec=opus]/ba", "-o", "-", pagina],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  processo.on("close", () => extras.limpar());
+  processo.on("error", () => extras.limpar());
+  const fluxo = processo.stdout;
+  const encerrar = () => processo.kill("SIGTERM");
 
   let bytes = 0;
   await new Promise<void>((pronto) => {

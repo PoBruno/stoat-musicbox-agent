@@ -11,6 +11,7 @@ import {
 
 import { config } from "./config.ts";
 import { ErroDeProvedor, fontes, type Faixa } from "./provedores.ts";
+import { argumentosDoYtdlp } from "./ytdlp.ts";
 
 /**
  * O LiveKit consome Opus a 48 kHz. Decodificamos para PCM nessa taxa e deixamos
@@ -216,11 +217,35 @@ export async function tocar(
   // O yt-dlp escreve o fluxo na saída padrão e o ffmpeg decodifica para PCM.
   // Dois processos em vez de um porque o endereço direto expira e é preso ao
   // IP: deixar o yt-dlp cuidar disso evita reimplementar a parte chata.
+  // `endereco` e a pagina do video: o yt-dlp extrai e baixa no mesmo
+  // processo, que e o unico jeito que o YouTube ainda aceita (ver ytdlp.ts).
+  // 251 e Opus a 48 kHz, o que o LiveKit consome.
+  const extras = argumentosDoYtdlp();
   const ytdlp = spawn(
     config.ytdlp,
-    ["--no-warnings", "--ignore-config", "-o", "-", endereco],
+    [
+      ...extras.args,
+      "--no-warnings",
+      "--ignore-config",
+      "--no-playlist",
+      "-f",
+      "251/bestaudio[acodec=opus]/ba",
+      "-o",
+      "-",
+      endereco,
+    ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
+  ytdlp.on("close", () => extras.limpar(erroCompleto));
+  ytdlp.on("error", () => extras.limpar());
+  // O motivo de uma faixa sem audio aparece aqui (403, conta recusada...).
+  let erroDoYtdlp = "";
+  let erroCompleto = "";
+  ytdlp.stderr?.on("data", (b: Buffer) => {
+    erroCompleto = (erroCompleto + b.toString()).slice(-4000);
+    const linha = b.toString().trim().split("\n").at(-1);
+    if (linha) erroDoYtdlp = linha;
+  });
 
   const ffmpeg = spawn(
     config.ffmpeg,
@@ -372,6 +397,7 @@ export async function tocar(
     // igual; com o YouTube recusando o download (403), uma playlist de 100
     // faixas era "tocada" inteira em dez minutos, sem um segundo de som.
     if (segundos < SEGUNDOS_MINIMOS) {
+      if (erroDoYtdlp) console.error(`[yt-dlp] ${erroDoYtdlp}`);
       void falhouSemAudio(canalId, faixa, tentativa);
       return;
     }

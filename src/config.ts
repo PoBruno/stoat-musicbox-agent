@@ -65,6 +65,20 @@ export const config = {
   ffmpeg: texto("FFMPEG_BIN", "ffmpeg"),
 
   /**
+   * Arquivo cookies.txt de uma conta do YouTube (formato Netscape).
+   *
+   * Sem ele o YouTube recusa o áudio a partir deste IP (ver ytdlp.ts). É
+   * segredo: montado somente leitura, nunca no git nem no log.
+   */
+  cookies: process.env.YTDLP_COOKIES?.trim() || null,
+
+  /**
+   * Onde guardar a sessão depois que o YouTube gira os cookies (gravável,
+   * persistente). Sem isso a sessão morre em minutos. Ver ytdlp.ts.
+   */
+  cookiesVivos: process.env.YTDLP_COOKIES_VIVOS?.trim() || null,
+
+  /**
    * Vídeo usado no teste de alcance da partida.
    *
    * O primeiro vídeo do YouTube: curto, público e estável há duas décadas.

@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 
+import { config } from "./config.ts";
+import { argumentosDoYtdlp } from "./ytdlp.ts";
+
 /**
  * Execução de processo externo com limite de tempo e saída capturada.
  *
@@ -14,10 +17,15 @@ export function executar(
 ): Promise<{ codigo: number; saida: string; erro: string }> {
   const limiteMs = opcoes.limiteMs ?? 30_000;
 
-  return new Promise((resolver) => {
-    const processo = spawn(comando, argumentos, {
+  // Toda chamada ao yt-dlp leva cookies e runtime JS (ver ytdlp.ts).
+  const extras =
+    comando === config.ytdlp ? argumentosDoYtdlp() : { args: [], limpar: () => {} };
+
+  return new Promise<{ codigo: number; saida: string; erro: string }>((resolver) => {
+    const processo = spawn(comando, [...extras.args, ...argumentos], {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    processo.on("close", () => extras.limpar(erro));
 
     let saida = "";
     let erro = "";
@@ -37,6 +45,8 @@ export function executar(
     processo.stderr.on("data", (pedaco) => (erro += pedaco));
 
     processo.on("error", (falha) => {
+      // Falha ao iniciar nao emite "close": limpa aqui tambem.
+      extras.limpar();
       if (encerrado) return;
       clearTimeout(relogio);
       resolver({ codigo: -1, saida, erro: `${erro}\n${falha.message}` });

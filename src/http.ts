@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { estadoDaSessao } from "./ytdlp.ts";
 
 import { config } from "./config.ts";
 import { medirCusto } from "./audio.ts";
@@ -57,6 +58,9 @@ export function subirHttp(
           }
           return responder(diag.ok ? 200 : 503, {
             ...diag,
+            // Sessao caida nao derruba o healthcheck (busca e fila seguem
+            // funcionando), mas aparece aqui para quem diagnostica.
+            sessaoYoutube: estadoDaSessao(),
             stoat: estadoDoRegistro(),
           });
         }
@@ -90,7 +94,7 @@ export function subirHttp(
           }
 
           const endereco = await fonte.enderecoDireto(faixa);
-          const medida = await medirCusto(endereco, 5);
+          const medida = await medirCusto(endereco, 20);
           return responder(200, {
             faixa: { titulo: faixa.titulo, duracaoS: faixa.duracaoS },
             amostra: {
