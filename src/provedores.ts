@@ -271,11 +271,358 @@ export class YouTube implements Provedor, Fonte {
   }
 }
 
+/**
+ * Faixas por playlist do Spotify. A página de embed, de onde lemos sem chave,
+ * entrega no máximo 100 (medido em 2026-11-22: "Rock Classics" tem 200).
+ */
+export const TETO_SPOTIFY = 100;
+
+const RE_SPOTIFY =
+  /^(https?:\/\/)?(open\.spotify\.com|spotify\.link|spotify\.app\.link)\/|^spotify:(track|album|playlist):/i;
+
+/** Encontrado no YouTube para cada faixa do Spotify, para não buscar duas vezes. */
+const espelhos = new Map<string, string>();
+
+/**
+ * Spotify: descobre O QUE tocar; o áudio vem do YouTube.
+ *
+ * O som do Spotify é protegido, e nenhum bot o toca. Todos fazem o mesmo
+ * (o LavaSrc chama de "Mirror"): leem a lista no Spotify e tocam a mesma
+ * música do YouTube.
+ *
+ * **De onde vem a lista.** Da página de embed (`open.spotify.com/embed/...`),
+ * a do player que os sites incorporam: pública, sem chave, com título,
+ * artistas e duração. A API oficial ficou inútil para isto em fevereiro de
+ * 2026: app novo só lê faixas de playlist da própria conta (e exige Premium e
+ * no máximo 5 usuários). O custo é o teto de 100 faixas por playlist e
+ * depender de uma página que não é contrato.
+ *
+ * **Quando buscar no YouTube.** Só na hora de tocar, uma faixa por vez.
+ * Buscar as 100 ao colar o link encheria a fila mais devagar e seria
+ * justamente a rajada de pedidos que faz o YouTube desafiar o IP.
+ */
+export class Spotify implements Provedor, Fonte {
+  readonly id = "spotify";
+
+  reconhece(entrada: string): boolean {
+    return RE_SPOTIFY.test(entrada.trim());
+  }
+
+  async resolver(entrada: string, limite = TETO_SPOTIFY): Promise<Faixa[]> {
+    const { tipo, id } = await this.lerEndereco(entrada);
+    const entidade = await this.lerEmbed(tipo, id);
+
+    if (tipo === "track") {
+      if (entidade.isPlayable === false) return [];
+      return [
+        this.faixa(
+          String(entidade.id ?? id),
+          String(entidade.name ?? entidade.title ?? ""),
+          (entidade.artists as { name: string }[] | undefined)
+            ?.map((a) => a.name)
+            .join(", ") ?? null,
+          entidade.duration,
+          capaDe(entidade),
+        ),
+      ].filter((f) => f.titulo);
+    }
+
+    // Faixa de playlist não traz capa própria; a de álbum é a do álbum.
+    const capa = tipo === "album" ? capaDe(entidade) : null;
+    const lista = (entidade.trackList ?? []) as Record<string, unknown>[];
+    return lista
+      .filter((t) => t.isPlayable !== false && t.title)
+      .slice(0, Math.min(limite, TETO_SPOTIFY))
+      .map((t) =>
+        this.faixa(
+          String(t.uri ?? "").split(":").at(-1) ?? "",
+          String(t.title),
+          (t.subtitle as string) ?? null,
+          t.duration,
+          capa,
+        ),
+      );
+  }
+
+  /**
+   * Acha a faixa no YouTube e devolve o endereço do áudio.
+   *
+   * Primeiro no YouTube Music, aba "músicas": ali estão as gravações de
+   * estúdio ("Provided to YouTube"), e não clipe com introdução falada nem
+   * versão ao vivo. Entre os primeiros resultados, fica o de duração parecida
+   * com a do Spotify; é o filtro que separa a música do cover e do "1 hora
+   * de loop". Sem nenhum parecido, vai o primeiro mesmo: tocar algo próximo
+   * é melhor que pular.
+   */
+  async enderecoDireto(faixa: Faixa): Promise<string> {
+    const conhecido = espelhos.get(faixa.id);
+    if (conhecido) {
+      return youtube.enderecoDireto({ ...faixa, paginaUrl: conhecido });
+    }
+
+    const termo = `${faixa.autor ?? ""} ${limparTitulo(faixa.titulo)}`.trim();
+    // As duas buscas em paralelo: e espera na troca de faixa, e em serie
+    // somavam uns 2 s a mais de silencio.
+    const [daMusica, doYoutube] = await Promise.all([
+      idsDaBusca(
+        `https://music.youtube.com/search?q=${encodeURIComponent(termo)}#songs`,
+        3,
+      ),
+      idsDaBusca(`ytsearch2:${termo}`, 2),
+    ]);
+    const candidatos = [...daMusica, ...doYoutube].filter(
+      (id, i, todos) => todos.indexOf(id) === i,
+    );
+
+    if (!candidatos.length) {
+      throw new ErroDeProvedor(
+        `não achei "${termo}" no YouTube`,
+        "nao_encontrado",
+      );
+    }
+
+    const tolerancia = faixa.duracaoS
+      ? Math.max(10, faixa.duracaoS * 0.1)
+      : Infinity;
+    let primeiro: { pagina: string; endereco: string } | null = null;
+
+    for (const id of candidatos) {
+      const pagina = `https://www.youtube.com/watch?v=${id}`;
+      const achado = await duracaoEEndereco(pagina).catch(() => null);
+      if (!achado) continue;
+      primeiro ??= { pagina, endereco: achado.endereco };
+      if (
+        !faixa.duracaoS ||
+        achado.duracaoS === null ||
+        Math.abs(achado.duracaoS - faixa.duracaoS) <= tolerancia
+      ) {
+        console.log(
+          `[spotify] "${termo}" (${faixa.duracaoS ?? "?"} s) -> ${id} (${achado.duracaoS ?? "?"} s)`,
+        );
+        lembrar(faixa.id, pagina);
+        return achado.endereco;
+      }
+    }
+
+    if (!primeiro) {
+      throw new ErroDeProvedor(
+        `nenhum resultado de "${termo}" pôde ser aberto`,
+        "nao_encontrado",
+      );
+    }
+    console.log(
+      `[spotify] "${termo}": nenhuma duração bateu, uso o primeiro resultado`,
+    );
+    lembrar(faixa.id, primeiro.pagina);
+    return primeiro.endereco;
+  }
+
+  /** Tipo e id, aceitando `/intl-pt/`, `?si=`, `spotify:` e link curto. */
+  private async lerEndereco(
+    entrada: string,
+  ): Promise<{ tipo: "track" | "album" | "playlist"; id: string }> {
+    let texto = entrada.trim();
+
+    const uri = /^spotify:(track|album|playlist):([A-Za-z0-9]+)/i.exec(texto);
+    if (uri?.[1] && uri[2]) {
+      return { tipo: uri[1].toLowerCase() as "track", id: uri[2] };
+    }
+
+    if (!/^https?:\/\//i.test(texto)) texto = `https://${texto}`;
+
+    // Link curto do app (spotify.link/xyz): o destino só aparece seguindo o
+    // redirecionamento.
+    if (/^https:\/\/(spotify\.link|spotify\.app\.link)\//i.test(texto)) {
+      const resposta = await fetch(texto, {
+        redirect: "follow",
+        headers: { "user-agent": NAVEGADOR },
+        signal: AbortSignal.timeout(10_000),
+      });
+      texto = resposta.url;
+      // Alguns curtos param numa página que tem o destino só no HTML.
+      if (!/open\.spotify\.com\/(intl-[a-z-]+\/)?(track|album|playlist)\//i.test(texto)) {
+        const html = await resposta.text();
+        texto =
+          /https:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:track|album|playlist)\/[A-Za-z0-9]+/i.exec(
+            html,
+          )?.[0] ?? texto;
+      }
+    }
+
+    const caminho =
+      /open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(track|album|playlist)\/([A-Za-z0-9]+)/i.exec(
+        texto,
+      );
+    if (!caminho?.[1] || !caminho[2]) {
+      throw new ErroDeProvedor(
+        "link do Spotify que não é música, álbum nem playlist",
+        "nao_encontrado",
+      );
+    }
+    return { tipo: caminho[1].toLowerCase() as "track", id: caminho[2] };
+  }
+
+  /** O objeto que a página de embed carrega em `__NEXT_DATA__`. */
+  private async lerEmbed(
+    tipo: string,
+    id: string,
+  ): Promise<Record<string, unknown> & { trackList?: unknown[] }> {
+    const resposta = await fetch(`https://open.spotify.com/embed/${tipo}/${id}`, {
+      headers: { "user-agent": NAVEGADOR, "accept-language": "pt-BR,pt;q=0.9" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (resposta.status === 404) {
+      throw new ErroDeProvedor("não existe no Spotify", "nao_encontrado");
+    }
+    if (!resposta.ok) {
+      throw new ErroDeProvedor(
+        `o Spotify respondeu ${resposta.status}`,
+        "desconhecido",
+      );
+    }
+
+    const html = await resposta.text();
+    const dados =
+      /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/.exec(html)?.[1];
+    const entidade = dados
+      ? JSON.parse(dados)?.props?.pageProps?.state?.data?.entity
+      : undefined;
+    if (!entidade) {
+      // Playlist privada cai aqui; formato novo da página também. O texto
+      // do log distingue os dois para quem for consertar.
+      console.error(
+        `[spotify] embed de ${tipo}/${id} sem dados (${html.length} bytes)`,
+      );
+      throw new ErroDeProvedor(
+        "o Spotify não mostrou essa lista (privada ou página mudou)",
+        "nao_encontrado",
+      );
+    }
+    return entidade;
+  }
+
+  private faixa(
+    id: string,
+    titulo: string,
+    autor: string | null,
+    duracaoMs: unknown,
+    capaUrl: string | null,
+  ): Faixa {
+    return {
+      id,
+      provedor: this.id,
+      titulo,
+      autor: autor || null,
+      duracaoS:
+        typeof duracaoMs === "number" && duracaoMs > 0
+          ? Math.round(duracaoMs / 1000)
+          : null,
+      capaUrl,
+      paginaUrl: `https://open.spotify.com/track/${id}`,
+    };
+  }
+}
+
+/** Identificação de navegador comum: a página de embed recusa clientes sem. */
+const NAVEGADOR =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+
+const youtube = new YouTube();
+
+/** Capa de 300 px, a menor que ainda fica boa no painel. */
+function capaDe(entidade: Record<string, unknown>): string | null {
+  const imagens =
+    ((entidade.visualIdentity as { image?: { url: string; maxWidth?: number }[] })
+      ?.image ?? []) as { url: string; maxWidth?: number }[];
+  const escolhida =
+    imagens.find((i) => i.maxWidth === 300) ?? imagens.at(-1) ?? null;
+  return (
+    escolhida?.url ??
+    (entidade.coverArt as { sources?: { url: string }[] })?.sources?.[0]?.url ??
+    null
+  );
+}
+
+/**
+ * Tira do título o que atrapalha a busca: "- Remastered 2011", "(feat. X)".
+ * O artista convidado já vai no campo de autor.
+ */
+function limparTitulo(titulo: string): string {
+  return titulo
+    .replace(/\s*[([]\s*(feat|ft|with)\.?\s[^)\]]*[)\]]/gi, "")
+    .replace(/\s+-\s+.*(remaster|version|mono|stereo|edit|live).*$/i, "")
+    .trim();
+}
+
+/** Ids dos primeiros resultados de uma busca, sem abrir cada vídeo. */
+async function idsDaBusca(alvo: string, quantos: number): Promise<string[]> {
+  const { saida } = await executar(
+    config.ytdlp,
+    [
+      "--no-warnings",
+      "--ignore-config",
+      "--flat-playlist",
+      "--playlist-end",
+      String(quantos),
+      "--print",
+      "id",
+      alvo,
+    ],
+    { limiteMs: 30_000 },
+  );
+  return saida
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^[A-Za-z0-9_-]{11}$/.test(l));
+}
+
+/** Duração e endereço do áudio de um vídeo, numa execução só do yt-dlp. */
+async function duracaoEEndereco(
+  pagina: string,
+): Promise<{ duracaoS: number | null; endereco: string }> {
+  const { codigo, saida, erro } = await executar(
+    config.ytdlp,
+    [
+      "--no-warnings",
+      "--ignore-config",
+      "-f",
+      "251/bestaudio[acodec=opus]/ba",
+      "--print",
+      "duration",
+      "--print",
+      "urls",
+      pagina,
+    ],
+    { limiteMs: 30_000 },
+  );
+  const [duracao, endereco] = saida.trim().split("\n");
+  if (codigo !== 0 || !endereco?.startsWith("https://")) {
+    throw new ErroDeProvedor(erro.trim().split("\n").at(-1) ?? "falhou", classificar(erro));
+  }
+  const segundos = Number(duracao);
+  return {
+    duracaoS: Number.isFinite(segundos) ? Math.round(segundos) : null,
+    endereco,
+  };
+}
+
+/** Guarda o espelho, sem deixar o mapa crescer para sempre. */
+function lembrar(spotifyId: string, pagina: string) {
+  if (espelhos.size >= 2000) {
+    const maisAntigo = espelhos.keys().next().value;
+    if (maisAntigo) espelhos.delete(maisAntigo);
+  }
+  espelhos.set(spotifyId, pagina);
+}
+
 /** Provedores conhecidos, na ordem em que são consultados */
-export const provedores: Provedor[] = [new YouTube()];
+export const provedores: Provedor[] = [new YouTube(), new Spotify()];
 
 /** Fontes conhecidas, indexadas pelo id do provedor */
-export const fontes = new Map<string, Fonte>([["youtube", new YouTube()]]);
+export const fontes = new Map<string, Fonte>([
+  ["youtube", new YouTube()],
+  ["spotify", new Spotify()],
+]);
 
 /**
  * Resolve uma entrada usando o primeiro provedor que a reconheça.
