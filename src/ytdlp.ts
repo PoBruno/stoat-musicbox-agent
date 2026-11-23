@@ -150,17 +150,16 @@ export function argumentosDoYtdlp(): {
           sessaoCaiu = new Date().toISOString();
           return;
         }
-        const depois = readFileSync(copia, "utf8");
-        // Pote sem LOGIN_INFO: NAO guardar, senao a proxima execucao ja sai
-        // deslogada. Mas tambem nao e prova de sessao morta: em 2026-11-22 o
-        // YouTube mandou apagar o LOGIN_INFO numa chamada da partida e, com o
-        // pote anterior, a faixa seguinte baixou inteira. O sinal confiavel de
-        // queda e o "cookies are no longer valid" acima.
-        if (logado(base) && !logado(depois)) {
-          console.log(
-            "[ytdlp] o YouTube pediu para apagar o login nesta chamada; mantendo a sessao anterior",
-          );
-          return;
+        let depois = readFileSync(copia, "utf8");
+        // O YouTube as vezes gira os cookies e, na MESMA resposta, manda
+        // apagar o LOGIN_INFO. Jogar fora esse pote inteiro (como era feito)
+        // descartava a rotacao junto, e o pote antigo passava a ser recusado:
+        // foi assim que a sessao de 2026-11-22 morreu em poucas horas. Agora
+        // guarda o que veio, como um navegador faria, e devolve o LOGIN_INFO
+        // antigo se ele sumiu. O sinal de queda e so o aviso acima.
+        if (logado(base) && !/\tLOGIN_INFO\t/.test(depois)) {
+          const login = base.split("\n").find((l) => /\tLOGIN_INFO\t/.test(l));
+          if (login) depois = `${depois.replace(/\n*$/, "\n")}${login}\n`;
         }
         if (cookies === base && linhas(depois) !== linhas(base)) {
           guardar(depois);
