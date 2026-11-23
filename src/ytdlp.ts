@@ -151,15 +151,15 @@ export function argumentosDoYtdlp(): {
           return;
         }
         const depois = readFileSync(copia, "utf8");
-        // O YouTube desloga apagando LOGIN_INFO: isso e a sessao caindo, e
-        // guardar esse pote deslogado esconderia a queda para sempre.
+        // Pote sem LOGIN_INFO: NAO guardar, senao a proxima execucao ja sai
+        // deslogada. Mas tambem nao e prova de sessao morta: em 2026-11-22 o
+        // YouTube mandou apagar o LOGIN_INFO numa chamada da partida e, com o
+        // pote anterior, a faixa seguinte baixou inteira. O sinal confiavel de
+        // queda e o "cookies are no longer valid" acima.
         if (logado(base) && !logado(depois)) {
-          if (!sessaoCaiu) {
-            console.error(
-              "[ytdlp] o YouTube deslogou a sessao. Exporte de novo, de janela anonima.",
-            );
-          }
-          sessaoCaiu = new Date().toISOString();
+          console.log(
+            "[ytdlp] o YouTube pediu para apagar o login nesta chamada; mantendo a sessao anterior",
+          );
           return;
         }
         if (cookies === base && linhas(depois) !== linhas(base)) {
