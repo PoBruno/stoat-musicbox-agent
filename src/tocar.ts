@@ -5,6 +5,7 @@ import {
   AudioSource,
   LocalAudioTrack,
   Room,
+  RoomEvent,
   TrackPublishOptions,
   TrackSource,
 } from "@livekit/rtc-node";
@@ -60,6 +61,8 @@ let atual: {
   /** Quadros já emitidos, que é como sabemos a posição */
   quadros: number;
   relogio: NodeJS.Timeout | null;
+  /** Prazo correndo porque a sala ficou sem ninguem; nulo se ha gente */
+  sozinho: NodeJS.Timeout | null;
   /** Guardado para poder desligar de verdade, e não só sinalizar */
   aoReceber: ((b: Buffer) => void) | null;
 } | null = null;
@@ -75,6 +78,7 @@ async function reportar(
   canal: string,
   posicaoS: number,
   terminou: boolean,
+  extra: { faixaId?: string; parou?: boolean } = {},
 ): Promise<void> {
   if (!config.stoatUrl || !config.segredo) return;
 
@@ -89,6 +93,9 @@ async function reportar(
         channel_id: canal,
         position_s: Math.floor(posicaoS),
         finished: terminou,
+        // O servidor descarta aviso de faixa que ja nao e a atual.
+        track_id: extra.faixaId,
+        stopped: extra.parou ?? false,
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -132,6 +139,7 @@ export async function parar(): Promise<void> {
   agora.cancelado = true;
 
   if (agora.relogio) clearInterval(agora.relogio);
+  if (agora.sozinho) clearTimeout(agora.sozinho);
 
   // Desliga o ouvinte de verdade, em vez de confiar numa bandeira. Enquanto
   // ele continuava inscrito, cada bloco que chegava reiniciava o laço de
@@ -288,6 +296,7 @@ export async function tocar(
     canal: canalId,
     quadros: 0,
     relogio: null as NodeJS.Timeout | null,
+    sozinho: null as NodeJS.Timeout | null,
     aoReceber: null as ((b: Buffer) => void) | null,
   };
   atual = eu;
@@ -299,11 +308,44 @@ export async function tocar(
   };
   console.log(`[tocar] "${faixa.titulo}" no canal ${canalId}`);
 
+  // Ninguem na chamada: para de tocar. Musica para sala vazia e banda e CPU
+  // gastas a toa, e quem voltasse horas depois encontraria a fila andada.
+  // O prazo cobre a queda rapida de conexao de quem estava ouvindo (o app
+  // reconecta em segundos) e quem esta trocando de canal.
+  const conferirSeSozinho = () => {
+    if (atual !== eu) return;
+    const gente = sala.remoteParticipants.size;
+    if (gente > 0) {
+      if (eu.sozinho) clearTimeout(eu.sozinho);
+      eu.sozinho = null;
+      return;
+    }
+    if (eu.sozinho) return;
+    eu.sozinho = setTimeout(() => {
+      if (atual !== eu || sala.remoteParticipants.size > 0) return;
+      console.log(
+        `[tocar] ninguem na chamada ha ${SOZINHO_MS / 1000} s; pausando a fila do canal ${canalId}`,
+      );
+      void reportar(canalId, eu.quadros / 100, false, {
+        faixaId: faixa.id,
+        parou: true,
+      }).finally(() => {
+        if (atual === eu) void parar();
+      });
+    }, SOZINHO_MS);
+  };
+  sala.on(RoomEvent.ParticipantConnected, conferirSeSozinho);
+  sala.on(RoomEvent.ParticipantDisconnected, conferirSeSozinho);
+  conferirSeSozinho();
+
   // A cada 5 s, e não a cada segundo: o servidor projeta a posição entre um
   // aviso e outro, então avisar mais vezes só gastaria requisição.
   eu.relogio = setInterval(() => {
     if (atual !== eu) return;
-    void reportar(canalId, eu.quadros / 100, false);
+    // Sem quadro nenhum ainda, a faixa esta carregando: avisar "0 s" agora
+    // tiraria o "carregando" do servidor antes de sair som.
+    if (eu.quadros === 0) return;
+    void reportar(canalId, eu.quadros / 100, false, { faixaId: faixa.id });
   }, 5_000);
 
   ffmpeg.stderr?.on("data", (b: Buffer) => {
@@ -362,6 +404,12 @@ export async function tocar(
             ),
           );
           eu.quadros++;
+          // Primeiro quadro no ar: e aqui que a musica comeca de verdade. O
+          // servidor segura a barra em "carregando" ate este aviso.
+          if (eu.quadros === 1) {
+            console.log(`[tocar] som no ar: "${faixa.titulo}"`);
+            void reportar(canalId, 0, false, { faixaId: faixa.id });
+          }
         }
       } catch (erro) {
         // A fonte de áudio pode parar de aceitar quadros — tipicamente no fim
@@ -405,11 +453,14 @@ export async function tocar(
     falhasSeguidas = 0;
     // Avisa que acabou ANTES de parar. É este aviso que faz o servidor puxar
     // a próxima da fila; `parar()` apaga o estado e o canal se perderia.
-    void reportar(canalId, segundos, true).finally(() => {
+    void reportar(canalId, segundos, true, { faixaId: faixa.id }).finally(() => {
       if (atual === eu) void parar();
     });
   });
 }
+
+/** Quanto tempo tocando para sala vazia antes de pausar. */
+const SOZINHO_MS = 30_000;
 
 /** Menos audio que isto ao encerrar nao e uma musica que acabou. */
 const SEGUNDOS_MINIMOS = 1;
@@ -449,7 +500,9 @@ async function falhouSemAudio(
     );
     // Zera: quem apertar tocar/proxima depois ganha mais tres tentativas.
     falhasSeguidas = 0;
-    await reportar(canalId, 0, false);
+    // O servidor para de dizer "tocando": sem isto a faixa ficava presa como
+    // atual e a barra corria em silencio ate o fim dela.
+    await reportar(canalId, 0, false, { faixaId: faixa.id, parou: true });
     await parar();
     return;
   }
@@ -458,6 +511,6 @@ async function falhouSemAudio(
   // O aviso faz o servidor mandar a proxima, que pode chegar antes desta
   // linha terminar: so para o que ainda for esta tocada.
   const esta = atual;
-  await reportar(canalId, 0, true);
+  await reportar(canalId, 0, true, { faixaId: faixa.id });
   if (atual === esta) await parar();
 }
